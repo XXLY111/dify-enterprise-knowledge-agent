@@ -1,5 +1,6 @@
 const API_CHAT = "/.netlify/functions/dify-chat";
 const API_CONFIG = "/.netlify/functions/dify-config";
+const API_HISTORY = "/.netlify/functions/dify-history";
 
 const state = {
   conversationId: "",
@@ -181,6 +182,8 @@ async function streamChat(query, bubbleEl) {
   let buffer = "";
   let answer = "";
   let retrieverResources = [];
+  let messageId = "";
+  let streamFinished = false;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -205,6 +208,8 @@ async function streamChat(query, bubbleEl) {
       if (event.conversation_id) {
         state.conversationId = event.conversation_id;
       }
+      if (event.message_id) messageId = event.message_id;
+      if (event.event === "message_end" || event.event === "workflow_finished") streamFinished = true;
 
       if (typeof event.answer === "string") {
         if (event.event === "message" || event.event === "agent_message") {
@@ -223,14 +228,51 @@ async function streamChat(query, bubbleEl) {
 
   bubbleEl.classList.remove("loading");
 
+  // Fall back to completed conversation history when streaming closes early.
+  if ((!answer || !streamFinished) && state.conversationId) {
+    bubbleEl.textContent = answer || "工作流仍在执行，正在获取完整回答…";
+    const recovered = await recoverFromHistory(query, messageId);
+    if (recovered?.answer) {
+      answer = recovered.answer;
+      bubbleEl.textContent = answer;
+      retrieverResources = recovered.retriever_resources || retrieverResources;
+    }
+  }
+
   if (!answer) {
-    bubbleEl.textContent = "（未收到回复内容，请检查 Dify 应用是否已发布且 API Key 有效）";
+    bubbleEl.textContent = "未能获取回答。请检查 Dify 日志或稍后重新提问。";
     return;
   }
 
   if (retrieverResources.length > 0) {
     appendCitations(bubbleEl, retrieverResources);
   }
+}
+
+async function recoverFromHistory(query, messageId) {
+  const params = new URLSearchParams({
+    conversation_id: state.conversationId,
+    user: state.userId,
+    message_id: messageId,
+    query,
+  });
+  for (let i = 0; i < 40; i++) {
+    try {
+      const response = await fetch(`${API_HISTORY}?${params}`, { cache: "no-store" });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.ready && typeof data.answer === "string" && data.answer.trim()) {
+          return data;
+        }
+      } else if (response.status === 401 || response.status === 403) {
+        break;
+      }
+    } catch {
+      // Retry transient errors while the Dify workflow finishes.
+    }
+    if (i < 39) await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  return null;
 }
 
 function appendCitations(bubbleEl, resources) {
