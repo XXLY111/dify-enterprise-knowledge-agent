@@ -1,6 +1,5 @@
 const API_CHAT = "/.netlify/functions/dify-chat";
 const API_CONFIG = "/.netlify/functions/dify-config";
-const API_HISTORY = "/.netlify/functions/dify-history";
 
 const state = {
   conversationId: "",
@@ -144,135 +143,73 @@ async function onSubmit(event) {
 }
 
 async function streamChat(query, bubbleEl) {
-  const response = await fetch(API_CHAT, {
+  // Dify Chatflows may take more than 30 seconds. Netlify's interactive
+  // streaming proxy was terminating before Dify emitted the final answer.
+  // Start a background job instead, then fetch its completed result.
+  const jobId = crypto.randomUUID();
+  const response = await fetch("/.netlify/functions/dify-run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
+      job_id: jobId,
       query,
       conversation_id: state.conversationId,
       user: state.userId,
-      response_mode: "streaming",
     }),
   });
 
-  if (!response.ok) {
-    let detail = "服务暂时不可用";
+  if (response.status !== 202) {
+    let explanation = "无法创建后台问答任务";
     try {
       const data = await response.json();
-      detail = data.error || data.detail || detail;
-      if (data.hint) detail += `（${data.hint}）`;
-    } catch {
-      /* ignore */
-    }
-    throw new Error(detail);
+      explanation = data.error || data.message || explanation;
+    } catch { /* Netlify may return an HTML error page */ }
+    throw new Error(explanation + "（HTTP " + response.status + "）");
   }
 
-  const contentType = response.headers.get("content-type") || "";
+  bubbleEl.textContent = "正在检索知识库并生成回答…";
+  const startedAt = Date.now();
+  const timeoutMs = 8 * 60 * 1000;
 
-  if (contentType.includes("application/json")) {
-    const data = await response.json();
-    bubbleEl.classList.remove("loading");
-    bubbleEl.textContent = data.answer || JSON.stringify(data);
-    if (data.conversation_id) state.conversationId = data.conversation_id;
-    return;
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let answer = "";
-  let retrieverResources = [];
-  let messageId = "";
-  let streamFinished = false;
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-
-    for (const line of lines) {
-      if (!line.startsWith("data:")) continue;
-      const payload = line.slice(5).trim();
-      if (!payload || payload === "[DONE]") continue;
-
-      let event;
-      try {
-        event = JSON.parse(payload);
-      } catch {
-        continue;
-      }
-
-      if (event.conversation_id) {
-        state.conversationId = event.conversation_id;
-      }
-      if (event.message_id) messageId = event.message_id;
-      if (event.event === "message_end" || event.event === "workflow_finished") streamFinished = true;
-
-      if (typeof event.answer === "string") {
-        if (event.event === "message" || event.event === "agent_message") {
-          answer += event.answer;
-        } else if (!event.event && event.answer) {
-          answer = event.answer;
-        }
-        bubbleEl.textContent = answer;
-      }
-
-      if (event.event === "message_end" && event.metadata?.retriever_resources) {
-        retrieverResources = event.metadata.retriever_resources;
-      }
-    }
-  }
-
-  bubbleEl.classList.remove("loading");
-
-  // Fall back to completed conversation history when streaming closes early.
-  if ((!answer || !streamFinished) && state.conversationId) {
-    bubbleEl.textContent = answer || "工作流仍在执行，正在获取完整回答…";
-    const recovered = await recoverFromHistory(query, messageId);
-    if (recovered?.answer) {
-      answer = recovered.answer;
-      bubbleEl.textContent = answer;
-      retrieverResources = recovered.retriever_resources || retrieverResources;
-    }
-  }
-
-  if (!answer) {
-    bubbleEl.textContent = "未能获取回答。请检查 Dify 日志或稍后重新提问。";
-    return;
-  }
-
-  if (retrieverResources.length > 0) {
-    appendCitations(bubbleEl, retrieverResources);
-  }
-}
-
-async function recoverFromHistory(query, messageId) {
-  const params = new URLSearchParams({
-    conversation_id: state.conversationId,
-    user: state.userId,
-    message_id: messageId,
-    query,
-  });
-  for (let i = 0; i < 40; i++) {
+  while (Date.now() - startedAt < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    let resultResponse;
     try {
-      const response = await fetch(`${API_HISTORY}?${params}`, { cache: "no-store" });
-      if (response.ok) {
-        const data = await response.json();
-        if (data.ready && typeof data.answer === "string" && data.answer.trim()) {
-          return data;
-        }
-      } else if (response.status === 401 || response.status === 403) {
-        break;
-      }
+      resultResponse = await fetch(
+        "/.netlify/functions/dify-result?job_id=" + encodeURIComponent(jobId),
+        { cache: "no-store" }
+      );
     } catch {
-      // Retry transient errors while the Dify workflow finishes.
+      continue; // Retry a transient connectivity problem.
     }
-    if (i < 39) await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    let result;
+    try {
+      result = await resultResponse.json();
+    } catch {
+      if (!resultResponse.ok) throw new Error("任务查询接口返回了无效数据");
+      continue;
+    }
+
+    if (result.status === "error" || result.status === "expired") {
+      throw new Error(result.error || "后台问答任务失败或已过期");
+    }
+    if (!resultResponse.ok) {
+      throw new Error(result.error || "后台任务状态查询失败（HTTP " + resultResponse.status + "）");
+    }
+
+    if (result.status === "done") {
+      if (result.conversation_id) state.conversationId = result.conversation_id;
+      bubbleEl.classList.remove("loading");
+      bubbleEl.textContent = result.answer || "Dify 没有返回可显示的答案";
+      if (Array.isArray(result.retriever_resources) && result.retriever_resources.length) {
+        appendCitations(bubbleEl, result.retriever_resources);
+      }
+      return;
+    }
+    bubbleEl.textContent = "正在检索知识库并生成回答…";
   }
-  return null;
+  throw new Error("等待回答超过 8 分钟。请检查 Netlify 后台任务日志。");
 }
 
 function appendCitations(bubbleEl, resources) {
