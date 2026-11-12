@@ -486,3 +486,47 @@ a:hover {
     display: none;
   }
 }
+
+/* User-facing assistant answer formatting; preserves the original dark theme. */
+.message.bot .bubble:has(.answer-markdown) {
+  white-space: normal;
+  min-width: 0;
+}
+.answer-markdown {
+  line-height: 1.75;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.answer-markdown p {
+  margin: 0 0 0.7em;
+}
+.answer-markdown p:last-child,
+.answer-markdown ul:last-child,
+.answer-markdown ol:last-child {
+  margin-bottom: 0;
+}
+.answer-markdown h3,
+.answer-markdown h4,
+.answer-markdown h5 {
+  font-size: 0.98em;
+  margin: 1em 0 0.45em;
+  color: var(--text);
+}
+.answer-markdown ul,
+.answer-markdown ol {
+  margin: 0.4em 0 0.9em;
+  padding-left: 1.6em;
+}
+.answer-markdown li {
+  margin: 0.3em 0;
+}
+.answer-markdown strong {
+  font-weight: 700;
+  color: #f5f7ff;
+}
+.answer-markdown code {
+  padding: 0.12em 0.35em;
+  border-radius: 5px;
+  background: rgba(148, 163, 184, 0.15);
+  font-size: 0.9em;
+}
