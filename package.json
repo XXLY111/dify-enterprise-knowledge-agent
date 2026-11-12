@@ -1,0 +1,9 @@
+{
+  "name": "dify-enterprise-knowledge-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@netlify/blobs": "^11.1.9"
+  }
+}
