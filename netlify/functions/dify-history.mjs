@@ -28,10 +28,8 @@ export default async (request) => {
     }
     const payload = await response.json();
     const records = Array.isArray(payload.data) ? payload.data : [];
-    const found = records.find((item) =>
-      (messageId && item.id === messageId) ||
-      (!messageId && item.query === query)
-    );
+    const found = records.find((item) => messageId && item.id === messageId) ||
+      records.find((item) => item.query === query && typeof item.answer === "string" && item.answer.trim());
 
     if (!found || typeof found.answer !== "string" || !found.answer.trim()) {
       return reply({ ready: false });
