@@ -201,7 +201,7 @@ async function streamChat(query, bubbleEl) {
     if (result.status === "done") {
       if (result.conversation_id) state.conversationId = result.conversation_id;
       bubbleEl.classList.remove("loading");
-      bubbleEl.textContent = result.answer || "Dify 没有返回可显示的答案";
+      renderAnswer(bubbleEl, result.answer || "Dify 没有返回可显示的答案");
       if (Array.isArray(result.retriever_resources) && result.retriever_resources.length) {
         appendCitations(bubbleEl, result.retriever_resources);
       }
@@ -212,13 +212,103 @@ async function streamChat(query, bubbleEl) {
   throw new Error("等待回答超过 8 分钟。请检查 Netlify 后台任务日志。");
 }
 
+
+// Only expose the final answer, never Qwen <think> content.
+function stripThinking(raw) {
+  let value = String(raw ?? "");
+  value = value.replace(/<think\b[^>]*>[\s\S]*?<\/think\s*>/gi, "");
+  value = value.replace(/<\|think\|>[\s\S]*?<\|\/think\|>/gi, "");
+  value = value.replace(/<think\b[^>]*>[\s\S]*$/gi, "");
+  value = value.replace(/<\|think\|>[\s\S]*$/gi, "");
+  if (/<\/think\s*>/i.test(value)) {
+    value = value.replace(/^[\s\S]*?<\/think\s*>/i, "");
+  }
+  return value.trim();
+}
+
+// Safe Markdown subset; never interpret model-supplied HTML.
+function renderAnswer(bubble, raw) {
+  const cleaned = stripThinking(raw).replace(/\r\n?/g, "\n");
+  bubble.replaceChildren();
+  if (!cleaned) {
+    bubble.textContent = "模型未返回可显示的正式回答。请在 Dify 模型设置中检查思考模式。";
+    return;
+  }
+
+  const root = document.createElement("div");
+  root.className = "answer-markdown";
+  bubble.appendChild(root);
+  let currentList = null;
+  let currentType = null;
+  let paragraph = null;
+
+  function inline(parent, text) {
+    const matcher = /(\*\*([^*]+)\*\*|__([^_]+)__|\x60([^\x60]+)\x60)/g;
+    let last = 0;
+    for (const match of text.matchAll(matcher)) {
+      if (match.index > last) parent.appendChild(document.createTextNode(text.slice(last, match.index)));
+      const el = document.createElement(match[4] !== undefined ? "code" : "strong");
+      el.textContent = match[2] ?? match[3] ?? match[4];
+      parent.appendChild(el);
+      last = match.index + match[0].length;
+    }
+    if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
+  }
+
+  for (const rawLine of cleaned.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) {
+      paragraph = null;
+      currentList = null;
+      currentType = null;
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      paragraph = null; currentList = null; currentType = null;
+      const node = document.createElement("h" + Math.min(heading[1].length + 2, 6));
+      inline(node, heading[2]);
+      root.appendChild(node);
+      continue;
+    }
+
+    const item = line.match(/^(?:[-*+]\s+|(\d+)[.)]\s+)(.*)$/);
+    if (item) {
+      paragraph = null;
+      const type = item[1] ? "ol" : "ul";
+      if (!currentList || currentType !== type) {
+        currentList = document.createElement(type);
+        currentType = type;
+        root.appendChild(currentList);
+      }
+      const li = document.createElement("li");
+      inline(li, item[2]);
+      currentList.appendChild(li);
+      continue;
+    }
+
+    currentList = null; currentType = null;
+    if (!paragraph) {
+      paragraph = document.createElement("p");
+      root.appendChild(paragraph);
+    } else {
+      paragraph.appendChild(document.createElement("br"));
+    }
+    inline(paragraph, line);
+  }
+}
+
 function appendCitations(bubbleEl, resources) {
   const names = [...new Set(resources.map((item) => item.document_name || item.dataset_name).filter(Boolean))];
   if (names.length === 0) return;
 
   const block = document.createElement("div");
   block.className = "citations";
-  block.innerHTML = `<strong>引用来源：</strong>${names.slice(0, 4).join(" · ")}`;
+  const heading = document.createElement("strong");
+  heading.textContent = "引用来源：";
+  block.appendChild(heading);
+  block.appendChild(document.createTextNode(names.slice(0, 4).join(" · ")));
   bubbleEl.appendChild(block);
 }
 
